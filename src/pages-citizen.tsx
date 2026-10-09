@@ -42,9 +42,10 @@ function fileExt(name: string) {
 }
 
 function isAllowedImage(file: File) {
-  const mime = file.type.toLowerCase()
+  const mime = file.type ? file.type.toLowerCase() : ''
   const ext = fileExt(file.name)
-  return IMAGE_MIMES.has(mime) || IMAGE_EXTS.includes(ext)
+  const commonImgExts = ['.jpg', '.jpeg', '.png', '.webp', '.jfif', '.pjpeg', '.pjp', '.gif', '.bmp', '.heic', '.heif', '.svg']
+  return mime.startsWith('image/') || IMAGE_MIMES.has(mime) || commonImgExts.includes(ext)
 }
 
 function isAllowedAudio(file: File) {
@@ -688,21 +689,33 @@ export function FileComplaintPage() {
               <strong>Exact location remains compulsory</strong>
               <div className="tiny muted">Normal photos and geotagged photos both use the location captured in step 1. Photo metadata does not replace required citizen location.</div>
             </div>
-            <div className="callout" style={{ marginTop: 12 }}>
+            <div
+              className="callout"
+              style={{ marginTop: 12, cursor: 'pointer', border: '2px dashed var(--border, #ccc)' }}
+              onDragOver={(e) => e.preventDefault()}
+              onDrop={(e) => {
+                e.preventDefault()
+                const files = e.dataTransfer.files
+                if (files && files.length) {
+                  const fakeEvent = { target: { files, value: '' } } as unknown as ChangeEvent<HTMLInputElement>
+                  onPhotosSelected(fakeEvent)
+                }
+              }}
+              onClick={() => photoInputRef.current?.click()}
+            >
               <strong>Add photo proof *</strong>
               <div className="tiny muted">
-                JPEG, PNG, or WebP · up to 5 MB each · up to {MAX_PHOTOS} photos. Previews stay in this browser session; files are
-                not sent to a server yet.
+                Click or drag & drop photos here (JPEG, PNG, WebP, HEIC · up to 5 MB each · up to {MAX_PHOTOS} photos).
               </div>
               <input
                 ref={photoInputRef}
                 type="file"
-                accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
+                accept="image/*,.jpg,.jpeg,.png,.webp,.jfif,.pjpeg,.heic,.heif"
                 multiple
                 hidden
                 onChange={onPhotosSelected}
               />
-              <button className="ghost" type="button" style={{ marginTop: 8 }} onClick={() => photoInputRef.current?.click()}>
+              <button className="ghost" type="button" style={{ marginTop: 8 }} onClick={(e) => { e.stopPropagation(); photoInputRef.current?.click(); }}>
                 {photos.length ? 'Add more photos' : 'Choose photos'}
               </button>
             </div>

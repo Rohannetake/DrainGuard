@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, type FormEvent } from 'react'
+import { useMemo, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { AuthNote, Captcha, Icon, SideNote, StatusBadge } from './components'
 import { useApp } from './context'
@@ -631,23 +631,11 @@ export function StatusPage() {
   const queryFilter = params.get('filter') || 'all'
 
   const [idInput, setIdInput] = useState(queryId || (complaints[0]?.id ?? 'RNE-PUN-2026-0048'))
-  const [activeId, setActiveId] = useState(queryId || (complaints[0]?.id ?? 'RNE-PUN-2026-0048'))
-  const [activeFilter, setActiveFilter] = useState<'all' | 'unsolved' | 'solved'>(
-    queryFilter === 'unsolved' || queryFilter === 'solved' ? queryFilter : 'all'
-  )
+  const [overrideId, setOverrideId] = useState<string | null>(null)
+  const [overrideFilter, setOverrideFilter] = useState<'all' | 'unsolved' | 'solved' | null>(null)
 
-  useEffect(() => {
-    if (queryId) {
-      setIdInput(queryId)
-      setActiveId(queryId)
-    }
-  }, [queryId])
-
-  useEffect(() => {
-    if (queryFilter === 'unsolved' || queryFilter === 'solved') {
-      setActiveFilter(queryFilter)
-    }
-  }, [queryFilter])
+  const activeId = overrideId || queryId || (complaints[0]?.id ?? 'RNE-PUN-2026-0048')
+  const activeFilter = overrideFilter || (queryFilter === 'unsolved' || queryFilter === 'solved' ? queryFilter : 'all')
 
   const filteredList = useMemo(() => {
     if (activeFilter === 'unsolved') {
@@ -677,7 +665,7 @@ export function StatusPage() {
         onSubmit={(e) => {
           e.preventDefault()
           if (idInput.trim()) {
-            setActiveId(idInput.trim())
+            setOverrideId(idInput.trim())
           }
         }}
       >
@@ -706,7 +694,7 @@ export function StatusPage() {
                 type="button"
                 className={`chip ${activeFilter === k ? 'on' : ''}`}
                 onClick={() => {
-                  setActiveFilter(k as any)
+                  setOverrideFilter(k as any)
                 }}
               >
                 {label}
@@ -723,7 +711,7 @@ export function StatusPage() {
                 className={`chip ${match?.id === c.id ? 'on' : ''}`}
                 onClick={() => {
                   setIdInput(c.id)
-                  setActiveId(c.id)
+                  setOverrideId(c.id)
                 }}
               >
                 {c.id} · {hazardLabel[c.hazard]}

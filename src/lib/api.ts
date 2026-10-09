@@ -160,13 +160,16 @@ export async function saveComplaintToSupabase(
   }[] = []
 
   for (const photoFile of rawPhotos) {
-    const path = `${citizenUserId}/${complaintUuid}/${photoFile.name}`
+    const cleanFileName = photoFile.name.replace(/[^a-zA-Z0-9_.-]/g, '_')
+    const path = `${citizenUserId}/${complaintUuid}/${cleanFileName}`
     const { error: uploadErr } = await supabase.storage.from('complaint-photos').upload(path, photoFile, {
-      contentType: photoFile.type,
+      contentType: photoFile.type || 'image/jpeg',
       upsert: true,
     })
 
-    if (!uploadErr) {
+    if (uploadErr) {
+      console.warn('[DrainGuard] Photo storage upload note:', uploadErr.message)
+    } else {
       attachmentsToInsert.push({
         complaint_id: complaintUuid,
         kind: 'photo',
