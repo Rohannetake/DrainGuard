@@ -1,5 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { complaintsSeed, regionsSeed } from './data'
+import { fetchComplaintsFromSupabase, fetchRegionsFromSupabase, updateComplaintInSupabase } from './lib/api'
+import { isSupabaseConfigured, supabase } from './lib/supabase'
 import type { Complaint, Region, Role, Session } from './types'
 
 type Theme = 'light' | 'dark'
@@ -66,6 +68,68 @@ export function AppProvider({ children }: { children: ReactNode }) {
     localStorage.setItem('rne-font', String(fontScale))
   }, [fontScale])
 
+  useEffect(() => {
+    if (!isSupabaseConfigured) return
+
+    fetchComplaintsFromSupabase().then((data) => {
+      if (data && data.length > 0) {
+        setComplaints(data)
+      }
+    })
+
+    fetchRegionsFromSupabase().then((data) => {
+      if (data && data.length > 0) {
+        setRegions(data)
+      }
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!isSupabaseConfigured) return
+
+    async function syncProfile(userId: string, email?: string) {
+      try {
+        const { data: profile } = await supabase
+          .from('profiles')
+          .select('role, display_name, contact')
+          .eq('id', userId)
+          .maybeSingle()
+
+        const s: Session = {
+          id: userId,
+          role: profile?.role || 'citizen',
+          name: profile?.display_name || email?.split('@')[0] || 'Citizen',
+          contact: profile?.contact || email || '',
+        }
+        setSession(s)
+        localStorage.setItem('rne-session', JSON.stringify(s))
+      } catch {
+        /* Keep existing session state if network call fails */
+      }
+    }
+
+    supabase.auth.getSession().then(({ data: { session: supaSession } }) => {
+      if (supaSession?.user) {
+        syncProfile(supaSession.user.id, supaSession.user.email)
+      }
+    })
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, supaSession) => {
+      if (supaSession?.user) {
+        syncProfile(supaSession.user.id, supaSession.user.email)
+      } else if (supaSession === null) {
+        setSession(null)
+        localStorage.removeItem('rne-session')
+      }
+    })
+
+    return () => {
+      subscription.unsubscribe()
+    }
+  }, [])
+
   const value = useMemo<AppState>(
     () => ({
       theme,
@@ -88,12 +152,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
         localStorage.setItem('rne-session', JSON.stringify(s))
       },
       logout: () => {
+        if (isSupabaseConfigured) {
+          supabase.auth.signOut().catch(() => {})
+        }
         setSession(null)
         localStorage.removeItem('rne-session')
       },
       addComplaint: (c) => setComplaints((prev) => [c, ...prev]),
-      updateComplaint: (id, patch) =>
-        setComplaints((prev) => prev.map((c) => (c.id === id ? { ...c, ...patch } : c))),
+      updateComplaint: (id, patch) => {
+        setComplaints((prev) => prev.map((c) => (c.id === id || c.dbId === id ? { ...c, ...patch } : c)))
+        updateComplaintInSupabase(id, patch).catch(() => {})
+      },
       addRegion: (r) => setRegions((prev) => (prev.some((x) => x.id === r.id) ? prev : [...prev, r])),
       setRegionPin: (id, pin) => setRegions((prev) => prev.map((r) => (r.id === id ? { ...r, pin } : r))),
       markExtraAttention: (assetId) => setExtra((prev) => (prev.includes(assetId) ? prev : [...prev, assetId])),

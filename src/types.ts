@@ -14,6 +14,7 @@ export type SessionAttachment = {
 }
 
 export type Session = {
+  id?: string
   role: Role
   name: string
   contact: string
@@ -27,6 +28,8 @@ export type Region = {
 
 export type Complaint = {
   id: string
+  dbId?: string
+  citizenId?: string
   hazard: Hazard
   locality: string
   pin: string | null

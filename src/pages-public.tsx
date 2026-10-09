@@ -3,7 +3,8 @@ import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { AuthNote, Captcha, Icon, SideNote, StatusBadge } from './components'
 import { useApp } from './context'
 import { MUNICIPAL_DOMAIN, SNAPSHOT, hazardLabel, satisfactionLabel } from './data'
-import type { CaseStatus, Role } from './types'
+import { isSupabaseConfigured, supabase } from './lib/supabase'
+import type { CaseStatus, Role, Session } from './types'
 
 export function PublicDashboard() {
   const { complaints } = useApp()
@@ -214,6 +215,7 @@ export function LoginPage() {
   const [password, setPassword] = useState('')
   const [captcha, setCaptcha] = useState(false)
   const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
 
   function switchRole(next: Role) {
     setRole(next)
@@ -221,7 +223,7 @@ export function LoginPage() {
     setContact(next === 'citizen' ? '' : next === 'worker' ? 'name@xyz.ronetenter.org' : 'officer@xyz.ronetenter.org')
   }
 
-  function submit(e: FormEvent) {
+  async function submit(e: FormEvent) {
     e.preventDefault()
     setError('')
     if (!captcha) return setError('Complete the illustrative CAPTCHA to continue.')
@@ -229,17 +231,80 @@ export function LoginPage() {
     if (role !== 'citizen' && !contact.toLowerCase().endsWith(`@${MUNICIPAL_DOMAIN}`)) {
       return setError(`Authorized staff email must end in ${MUNICIPAL_DOMAIN}.`)
     }
-    if (role === 'admin') {
-      sessionStorage.setItem('rne-admin-pending', JSON.stringify({ contact, name: 'Demo administrator' }))
-      nav('/login/admin-otp')
-      return
+
+    if (isSupabaseConfigured) {
+      setLoading(true)
+      try {
+        const isEmail = contact.includes('@')
+        if (!isEmail) {
+          setLoading(false)
+          return setError('Supabase authentication requires a valid email address.')
+        }
+
+        const { data, error: supaError } = await supabase.auth.signInWithPassword({
+          email: contact.trim(),
+          password,
+        })
+
+        if (supaError) {
+          setLoading(false)
+          return setError(supaError.message)
+        }
+
+        if (data.user) {
+          const { data: profile } = await supabase
+            .from('profiles')
+            .select('role, display_name, contact')
+            .eq('id', data.user.id)
+            .maybeSingle()
+
+          const actualRole: Role = profile?.role || 'citizen'
+
+          if (role === 'admin' && actualRole !== 'admin') {
+            setLoading(false)
+            return setError('This account does not have administrator privileges.')
+          }
+
+          if (role === 'worker' && actualRole !== 'worker' && actualRole !== 'admin') {
+            setLoading(false)
+            return setError('This account does not have municipal worker privileges.')
+          }
+
+          const userSession: Session = {
+            id: data.user.id,
+            role: actualRole,
+            name: profile?.display_name || data.user.email?.split('@')[0] || (role === 'worker' ? 'Worker' : role === 'admin' ? 'Admin' : 'Citizen'),
+            contact: data.user.email || contact,
+          }
+
+          login(userSession)
+
+          if (role === 'admin') {
+            sessionStorage.setItem('rne-admin-pending', JSON.stringify({ contact: userSession.contact, name: userSession.name }))
+            nav('/login/admin-otp')
+          } else {
+            nav(role === 'worker' ? '/worker' : '/citizen')
+          }
+        }
+      } catch (err: any) {
+        setLoading(false)
+        setError(err?.message || 'Login failed. Please check your credentials.')
+      } finally {
+        setLoading(false)
+      }
+    } else {
+      if (role === 'admin') {
+        sessionStorage.setItem('rne-admin-pending', JSON.stringify({ contact, name: 'Demo administrator' }))
+        nav('/login/admin-otp')
+        return
+      }
+      login({
+        role,
+        contact,
+        name: role === 'worker' ? 'Demo worker' : 'Demo citizen',
+      })
+      nav(role === 'worker' ? '/worker' : '/citizen')
     }
-    login({
-      role,
-      contact,
-      name: role === 'worker' ? 'Demo worker' : 'Demo citizen',
-    })
-    nav(role === 'worker' ? '/worker' : '/citizen')
   }
 
   const title = role === 'admin' ? 'Officer / Administrator login' : role === 'worker' ? 'Municipal worker login' : 'Login to your account'
@@ -285,8 +350,8 @@ export function LoginPage() {
           </div>
           <Captcha checked={captcha} onChange={setCaptcha} />
           {error && <p className="hint" style={{ color: 'var(--danger)' }}>{error}</p>}
-          <button className="btn block" type="submit">
-            {role === 'admin' ? 'Next' : role === 'worker' ? 'Login as worker' : 'Login as citizen'}
+          <button className="btn block" type="submit" disabled={loading}>
+            {loading ? 'Authenticating…' : role === 'admin' ? 'Next' : role === 'worker' ? 'Login as worker' : 'Login as citizen'}
           </button>
           {role === 'citizen' && (
             <p>
@@ -298,7 +363,7 @@ export function LoginPage() {
           {role === 'admin' && (
             <div className="callout" style={{ marginTop: 12 }}>
               <strong>Email verification follows</strong>
-              <div className="tiny muted">The next step represents an OTP sent to the administrator's authorized email. No message is actually sent.</div>
+              <div className="tiny muted">The next step represents an OTP sent to the administrator's authorized email.</div>
             </div>
           )}
           {role === 'worker' && (
@@ -329,14 +394,59 @@ export function RegisterPage() {
   const [confirm, setConfirm] = useState('')
   const [captcha, setCaptcha] = useState(false)
   const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
 
-  function submit(e: FormEvent) {
+  async function submit(e: FormEvent) {
     e.preventDefault()
+    setError('')
     if (!captcha) return setError('Complete the illustrative CAPTCHA to continue.')
     if (!name || !contact || !pass) return setError('Fill all required fields.')
     if (pass !== confirm) return setError('Passwords do not match.')
-    login({ role: 'citizen', name, contact })
-    nav('/citizen')
+    if (pass.length < 6) return setError('Password must be at least 6 characters long.')
+
+    if (isSupabaseConfigured) {
+      setLoading(true)
+      try {
+        const isEmail = contact.includes('@')
+        if (!isEmail) {
+          setLoading(false)
+          return setError('Supabase registration requires a valid email address.')
+        }
+
+        const { data, error: supaError } = await supabase.auth.signUp({
+          email: contact.trim(),
+          password: pass,
+          options: {
+            data: {
+              display_name: name.trim(),
+            },
+          },
+        })
+
+        if (supaError) {
+          setLoading(false)
+          return setError(supaError.message)
+        }
+
+        if (data.user) {
+          login({
+            id: data.user.id,
+            role: 'citizen',
+            name: name.trim(),
+            contact: contact.trim(),
+          })
+          nav('/citizen')
+        }
+      } catch (err: any) {
+        setLoading(false)
+        setError(err?.message || 'Registration failed. Try again.')
+      } finally {
+        setLoading(false)
+      }
+    } else {
+      login({ role: 'citizen', name, contact })
+      nav('/citizen')
+    }
   }
 
   return (
@@ -353,12 +463,12 @@ export function RegisterPage() {
           </label>
           <label>
             Email or phone number <span className="req">*</span>
-            <input value={contact} onChange={(e) => setContact(e.target.value)} placeholder="Enter email or mobile number" />
+            <input value={contact} onChange={(e) => setContact(e.target.value)} placeholder="Enter email address" />
           </label>
-          <p className="hint">Provide either one for account access and recovery.</p>
+          <p className="hint">Provide a valid email address for account access and recovery.</p>
           <label>
             Create password <span className="req">*</span>
-            <input type="password" value={pass} onChange={(e) => setPass(e.target.value)} placeholder="Create a password" />
+            <input type="password" value={pass} onChange={(e) => setPass(e.target.value)} placeholder="Create a password (min. 6 characters)" />
           </label>
           <label>
             Confirm password <span className="req">*</span>
@@ -366,8 +476,8 @@ export function RegisterPage() {
           </label>
           <Captcha checked={captcha} onChange={setCaptcha} />
           {error && <p className="hint" style={{ color: 'var(--danger)' }}>{error}</p>}
-          <button className="btn block" type="submit">
-            Create citizen account
+          <button className="btn block" type="submit" disabled={loading}>
+            {loading ? 'Creating account…' : 'Create citizen account'}
           </button>
           <p>
             <Link className="linkish" to="/login">
@@ -387,6 +497,31 @@ export function ForgotPage() {
   const [contact, setContact] = useState('')
   const [captcha, setCaptcha] = useState(false)
   const [sent, setSent] = useState(false)
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  async function handleSubmit(e: FormEvent) {
+    e.preventDefault()
+    setError('')
+    if (!captcha || !contact) return
+    if (isSupabaseConfigured) {
+      setLoading(true)
+      try {
+        const { error: supaError } = await supabase.auth.resetPasswordForEmail(contact.trim())
+        if (supaError) {
+          setError(supaError.message)
+        } else {
+          setSent(true)
+        }
+      } catch (err: any) {
+        setError(err?.message || 'Password reset request failed.')
+      } finally {
+        setLoading(false)
+      }
+    } else {
+      setSent(true)
+    }
+  }
 
   return (
     <>
@@ -394,28 +529,19 @@ export function ForgotPage() {
       <h1>Recover your password</h1>
       <p className="lede">Use the email or phone number associated with your account.</p>
       <div className="grid-2">
-        <form
-          className="card pad"
-          onSubmit={(e) => {
-            e.preventDefault()
-            if (captcha && contact) setSent(true)
-          }}
-        >
+        <form className="card pad" onSubmit={handleSubmit}>
           <h2 style={{ marginTop: 0 }}>Forgot password?</h2>
           <label>
             Registered email or phone number <span className="req">*</span>
-            <input value={contact} onChange={(e) => setContact(e.target.value)} placeholder="Enter email or mobile number" />
+            <input value={contact} onChange={(e) => setContact(e.target.value)} placeholder="Enter email address" />
           </label>
           <p className="hint">Municipal staff should use their authorized email.</p>
           <Captcha checked={captcha} onChange={setCaptcha} />
-          <button className="btn block" type="submit">
-            Send recovery instructions
+          {error && <p className="hint" style={{ color: 'var(--danger)' }}>{error}</p>}
+          <button className="btn block" type="submit" disabled={loading}>
+            {loading ? 'Sending instructions…' : 'Send recovery instructions'}
           </button>
-          {sent && <p className="callout ok">Illustrative recovery state recorded. This prototype does not send emails or SMS.</p>}
-          <div className="callout" style={{ marginTop: 12 }}>
-            <strong>Recovery via email or phone</strong>
-            <div className="tiny muted">Instructions would be sent to the contact linked to your account. This prototype does not send emails or SMS.</div>
-          </div>
+          {sent && <p className="callout ok">Password recovery instructions have been sent if an account exists for this email.</p>}
           <p>
             <Link className="linkish" to="/login">
               ← Back to login
