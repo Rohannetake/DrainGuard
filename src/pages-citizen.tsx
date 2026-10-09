@@ -3,7 +3,9 @@ import { Link, Navigate, useNavigate } from 'react-router-dom'
 import { StatusBadge } from './components'
 import { useApp } from './context'
 import { attentionLabel, hazardLabel, sampleSiteByRegion, satisfactionLabel } from './data'
-import type { Attention, CaseStatus, Hazard, PhotoKind, SessionAttachment } from './types'
+import { saveComplaintToSupabase } from './lib/api'
+import { isSupabaseConfigured } from './lib/supabase'
+import type { Attention, CaseStatus, Complaint, Hazard, PhotoKind, SessionAttachment } from './types'
 
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024
 const MAX_AUDIO_BYTES = 10 * 1024 * 1024
@@ -138,7 +140,7 @@ export function CitizenHome() {
             {rows.map((c) => (
               <tr key={c.id}>
                 <td>
-                  <Link to={`/status`} style={{ fontWeight: 700 }}>
+                  <Link to={`/status?id=${c.id}`} style={{ fontWeight: 700 }}>
                     {c.id}
                   </Link>
                   <div className="tiny muted">{hazardLabel[c.hazard]}</div>
@@ -394,7 +396,7 @@ export function FileComplaintPage() {
     setStep(next)
   }
 
-  function submit() {
+  async function submit() {
     if (submitting) return
     setSubmitError('')
     if (recording) {
@@ -418,7 +420,8 @@ export function FileComplaintPage() {
       keepUrlsRef.current = [...photoAttachments.map((p) => p.objectUrl), audioAttachment?.objectUrl].filter(
         (u): u is string => Boolean(u),
       )
-      addComplaint({
+
+      const baseComplaint: Complaint = {
         id,
         hazard: (draft.hazard || 'open-drain') as Hazard,
         locality: region?.name || 'Hadapsar',
@@ -442,12 +445,24 @@ export function FileComplaintPage() {
         audioName: audio?.name,
         photos: photoAttachments,
         audio: audioAttachment,
-      })
-      nav(`/complaints/submitted?id=${id}`)
-    } catch {
+      }
+
+      let finalComplaint = baseComplaint
+      if (isSupabaseConfigured && session?.id) {
+        finalComplaint = await saveComplaintToSupabase(
+          baseComplaint,
+          session.id,
+          photos.map((p) => p.file),
+          audio ? { blob: audio.blob, name: audio.name } : undefined
+        )
+      }
+
+      addComplaint(finalComplaint)
+      nav(`/complaints/submitted?id=${finalComplaint.id}`)
+    } catch (err: any) {
       setSubmitting(false)
       keepUrlsRef.current = []
-      setSubmitError('Could not prepare this complaint. Try again.')
+      setSubmitError(err?.message || 'Could not prepare this complaint. Try again.')
     }
   }
 

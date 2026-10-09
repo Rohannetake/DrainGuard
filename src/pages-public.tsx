@@ -1,4 +1,4 @@
-import { useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { AuthNote, Captcha, Icon, SideNote, StatusBadge } from './components'
 import { useApp } from './context'
@@ -140,7 +140,7 @@ export function PublicDashboard() {
             <div className="stat">{String(unresolved.length).padStart(2, '0')}</div>
           </div>
           {unresolved.map((c) => (
-            <div className="list-row" key={c.id}>
+            <Link className="list-row" key={c.id} to={`/status?id=${c.id}`}>
               <div>
                 <strong>
                   {hazardLabel[c.hazard]} · {c.locality}
@@ -151,9 +151,9 @@ export function PublicDashboard() {
                 </div>
               </div>
               <StatusBadge status={c.status} />
-            </div>
+            </Link>
           ))}
-          <Link className="linkish" to="/status">
+          <Link className="linkish" to="/status?filter=unsolved">
             View unresolved cases →
           </Link>
         </section>
@@ -168,7 +168,7 @@ export function PublicDashboard() {
             </div>
           </div>
           {solved.map((c) => (
-            <div className="list-row" key={c.id}>
+            <Link className="list-row" key={c.id} to={`/status?id=${c.id}`}>
               <div>
                 <strong>
                   {hazardLabel[c.hazard]} · {c.locality}
@@ -180,9 +180,9 @@ export function PublicDashboard() {
                 <div className="tiny muted">Citizen: {satisfactionLabel[c.satisfaction].toLowerCase()}</div>
               </div>
               <StatusBadge status={c.status} />
-            </div>
+            </Link>
           ))}
-          <Link className="linkish" to="/status">
+          <Link className="linkish" to="/status?filter=solved">
             View solved cases →
           </Link>
         </section>
@@ -626,33 +626,114 @@ export function AdminOtpPage() {
 
 export function StatusPage() {
   const { complaints } = useApp()
-  const [id, setId] = useState('RNE-PUN-2026-0048')
-  const [viewed, setViewed] = useState(complaints[0])
-  const match = complaints.find((c) => c.id.toLowerCase() === id.trim().toLowerCase()) || viewed
+  const [params] = useSearchParams()
+  const queryId = params.get('id') || ''
+  const queryFilter = params.get('filter') || 'all'
+
+  const [idInput, setIdInput] = useState(queryId || (complaints[0]?.id ?? 'RNE-PUN-2026-0048'))
+  const [activeId, setActiveId] = useState(queryId || (complaints[0]?.id ?? 'RNE-PUN-2026-0048'))
+  const [activeFilter, setActiveFilter] = useState<'all' | 'unsolved' | 'solved'>(
+    queryFilter === 'unsolved' || queryFilter === 'solved' ? queryFilter : 'all'
+  )
+
+  useEffect(() => {
+    if (queryId) {
+      setIdInput(queryId)
+      setActiveId(queryId)
+    }
+  }, [queryId])
+
+  useEffect(() => {
+    if (queryFilter === 'unsolved' || queryFilter === 'solved') {
+      setActiveFilter(queryFilter)
+    }
+  }, [queryFilter])
+
+  const filteredList = useMemo(() => {
+    if (activeFilter === 'unsolved') {
+      return complaints.filter((c) => c.status !== 'solved' && c.status !== 'rejected')
+    }
+    if (activeFilter === 'solved') {
+      return complaints.filter((c) => c.status === 'solved')
+    }
+    return complaints
+  }, [complaints, activeFilter])
+
+  const match =
+    complaints.find(
+      (c) => c.id.toLowerCase() === activeId.trim().toLowerCase() || c.dbId === activeId.trim()
+    ) ||
+    filteredList[0] ||
+    complaints[0]
 
   return (
     <>
-      <p className="kicker">Complaint status · Sample case</p>
+      <p className="kicker">Complaint status · Pune</p>
       <h1>Track your complaint</h1>
-      <p className="lede">Enter a complaint ID to view its status. All case information shown here is sample data.</p>
+      <p className="lede">Enter a complaint ID or select a case below to view its live status.</p>
       <form
         className="card pad"
         style={{ display: 'flex', gap: 12, alignItems: 'end', flexWrap: 'wrap' }}
         onSubmit={(e) => {
           e.preventDefault()
-          if (match) setViewed(match)
+          if (idInput.trim()) {
+            setActiveId(idInput.trim())
+          }
         }}
       >
         <div style={{ flex: 1, minWidth: 240 }}>
           <label>
             Complaint ID <span className="req">*</span>
-            <input value={id} onChange={(e) => setId(e.target.value)} />
+            <input value={idInput} onChange={(e) => setIdInput(e.target.value)} placeholder="e.g. RNE-PUN-2026-0048" />
           </label>
         </div>
         <button className="btn" type="submit">
           <Icon name="search" /> View status
         </button>
       </form>
+
+      <div className="card pad" style={{ marginTop: 12 }}>
+        <div className="space">
+          <strong style={{ fontSize: '0.9rem' }}>Filter cases view</strong>
+          <div className="chips">
+            {[
+              ['all', 'All cases'],
+              ['unsolved', 'Unresolved cases'],
+              ['solved', 'Solved cases'],
+            ].map(([k, label]) => (
+              <button
+                key={k}
+                type="button"
+                className={`chip ${activeFilter === k ? 'on' : ''}`}
+                onClick={() => {
+                  setActiveFilter(k as any)
+                }}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        </div>
+        {filteredList.length > 0 && (
+          <div className="chips" style={{ marginTop: 10 }}>
+            {filteredList.map((c) => (
+              <button
+                key={c.id}
+                type="button"
+                className={`chip ${match?.id === c.id ? 'on' : ''}`}
+                onClick={() => {
+                  setIdInput(c.id)
+                  setActiveId(c.id)
+                }}
+              >
+                {c.id} · {hazardLabel[c.hazard]}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {match && (
       <div className="grid-2" style={{ marginTop: 16 }}>
         <div className="stack">
           <section className="card pad">
@@ -729,6 +810,7 @@ export function StatusPage() {
           </section>
         </div>
       </div>
+      )}
     </>
   )
 }
