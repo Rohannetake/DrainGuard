@@ -1,9 +1,63 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState, type ChangeEvent } from 'react'
 import { Link, Navigate, useNavigate } from 'react-router-dom'
 import { StatusBadge } from './components'
 import { useApp } from './context'
 import { attentionLabel, hazardLabel, sampleSiteByRegion, satisfactionLabel } from './data'
-import type { Attention, CaseStatus, Hazard, PhotoKind } from './types'
+import type { Attention, CaseStatus, Hazard, PhotoKind, SessionAttachment } from './types'
+
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024
+const MAX_AUDIO_BYTES = 10 * 1024 * 1024
+const MAX_PHOTOS = 8
+const IMAGE_EXTS = ['.jpg', '.jpeg', '.png', '.webp']
+const AUDIO_EXTS = ['.mp3', '.wav', '.ogg', '.webm', '.m4a', '.aac', '.opus']
+const IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/jpg'])
+const AUDIO_MIMES = new Set([
+  'audio/mpeg',
+  'audio/mp3',
+  'audio/wav',
+  'audio/wave',
+  'audio/x-wav',
+  'audio/ogg',
+  'audio/webm',
+  'audio/mp4',
+  'audio/aac',
+  'audio/x-m4a',
+  'audio/opus',
+])
+
+type PhotoItem = { id: string; file: File; url: string }
+type AudioItem = { id: string; blob: Blob; name: string; url: string; source: 'record' | 'upload' }
+
+function formatSize(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+function fileExt(name: string) {
+  const i = name.lastIndexOf('.')
+  return i >= 0 ? name.slice(i).toLowerCase() : ''
+}
+
+function isAllowedImage(file: File) {
+  const mime = file.type.toLowerCase()
+  const ext = fileExt(file.name)
+  return IMAGE_MIMES.has(mime) || IMAGE_EXTS.includes(ext)
+}
+
+function isAllowedAudio(file: File) {
+  const mime = file.type.toLowerCase()
+  const ext = fileExt(file.name)
+  return mime.startsWith('audio/') || AUDIO_MIMES.has(mime) || AUDIO_EXTS.includes(ext)
+}
+
+function toSessionAttachment(name: string, blob: Blob, url: string): SessionAttachment {
+  return { name, sizeLabel: formatSize(blob.size), mime: blob.type || 'application/octet-stream', objectUrl: url }
+}
+
+function newId() {
+  return crypto.randomUUID()
+}
 
 export function CitizenHome() {
   const { session, complaints } = useApp()
@@ -113,9 +167,7 @@ type Draft = {
   hazard: Hazard | ''
   locationOn: boolean
   description: string
-  audioName: string
   photoKind: PhotoKind
-  photoName: string
   attention: Attention
 }
 
@@ -125,9 +177,7 @@ const emptyDraft: Draft = {
   hazard: 'open-drain',
   locationOn: false,
   description: '',
-  audioName: '',
   photoKind: 'normal',
-  photoName: '',
   attention: 'high',
 }
 
@@ -137,39 +187,268 @@ export function FileComplaintPage() {
   const [step, setStep] = useState(1)
   const [draft, setDraft] = useState<Draft>(emptyDraft)
   const [descMode, setDescMode] = useState<'written' | 'audio'>('written')
+  const [photos, setPhotos] = useState<PhotoItem[]>([])
+  const [audio, setAudio] = useState<AudioItem | null>(null)
+  const [photoError, setPhotoError] = useState('')
+  const [audioError, setAudioError] = useState('')
+  const [submitError, setSubmitError] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [recording, setRecording] = useState(false)
+
+  const photoInputRef = useRef<HTMLInputElement>(null)
+  const audioInputRef = useRef<HTMLInputElement>(null)
+  const streamRef = useRef<MediaStream | null>(null)
+  const recorderRef = useRef<MediaRecorder | null>(null)
+  const chunksRef = useRef<Blob[]>([])
+  const photosRef = useRef<PhotoItem[]>([])
+  const audioRef = useRef<AudioItem | null>(null)
+  const keepUrlsRef = useRef<string[]>([])
+  const pageLiveRef = useRef(true)
+
+  useEffect(() => {
+    photosRef.current = photos
+    audioRef.current = audio
+  }, [photos, audio])
+
+  useEffect(() => {
+    pageLiveRef.current = true
+    return () => {
+      pageLiveRef.current = false
+      const recorder = recorderRef.current
+      if (recorder && recorder.state !== 'inactive') {
+        try {
+          recorder.stop()
+        } catch {
+          /* already stopped */
+        }
+      }
+      streamRef.current?.getTracks().forEach((t) => t.stop())
+      streamRef.current = null
+      const keep = new Set(keepUrlsRef.current)
+      for (const p of photosRef.current) {
+        if (!keep.has(p.url)) URL.revokeObjectURL(p.url)
+      }
+      const currentAudio = audioRef.current
+      if (currentAudio && !keep.has(currentAudio.url)) URL.revokeObjectURL(currentAudio.url)
+    }
+  }, [])
+
+  function stopMicTracks() {
+    streamRef.current?.getTracks().forEach((t) => t.stop())
+    streamRef.current = null
+  }
+
+  function clearAudio(next: AudioItem | null) {
+    if (audioRef.current && audioRef.current.url !== next?.url) {
+      URL.revokeObjectURL(audioRef.current.url)
+    }
+    audioRef.current = next
+    setAudio(next)
+  }
+
   if (!session || session.role !== 'citizen') return <Navigate to="/login?role=citizen" replace />
 
   const region = regions.find((r) => r.id === draft.regionId)
   const site = sampleSiteByRegion[draft.regionId] || sampleSiteByRegion.hadapsar
   const canStep2 = Boolean(draft.regionId && draft.hazard && draft.locationOn)
-  const canStep3 = Boolean(draft.description.trim() || draft.audioName)
+  const canStep3 = Boolean(draft.description.trim() || audio)
+  const recordingSupported = typeof MediaRecorder !== 'undefined' && Boolean(navigator.mediaDevices?.getUserMedia)
+
+  function onPhotosSelected(e: ChangeEvent<HTMLInputElement>) {
+    const list = e.target.files
+    e.target.value = ''
+    if (!list?.length) return
+    setPhotoError('')
+    const messages: string[] = []
+    const additions: PhotoItem[] = []
+    let remaining = MAX_PHOTOS - photosRef.current.length
+    if (remaining <= 0) {
+      setPhotoError(`You can attach up to ${MAX_PHOTOS} photos.`)
+      return
+    }
+    for (const file of Array.from(list)) {
+      if (remaining <= 0) {
+        messages.push(`Only ${MAX_PHOTOS} photos are allowed. Extra files were skipped.`)
+        break
+      }
+      if (!isAllowedImage(file)) {
+        messages.push(`${file.name}: use JPEG, PNG, or WebP.`)
+        continue
+      }
+      if (file.size > MAX_IMAGE_BYTES) {
+        messages.push(`${file.name}: larger than 5 MB (${formatSize(file.size)}).`)
+        continue
+      }
+      additions.push({ id: newId(), file, url: URL.createObjectURL(file) })
+      remaining -= 1
+    }
+    if (additions.length) {
+      const next = [...photosRef.current, ...additions]
+      photosRef.current = next
+      setPhotos(next)
+    }
+    if (messages.length) setPhotoError(messages.join(' '))
+  }
+
+  function removePhoto(id: string) {
+    const target = photosRef.current.find((p) => p.id === id)
+    if (target) URL.revokeObjectURL(target.url)
+    const next = photosRef.current.filter((p) => p.id !== id)
+    photosRef.current = next
+    setPhotos(next)
+    setPhotoError('')
+  }
+
+  function onAudioSelected(e: ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    setAudioError('')
+    if (!isAllowedAudio(file)) {
+      setAudioError(`${file.name}: use an audio file such as MP3, WAV, OGG, WebM, or M4A.`)
+      return
+    }
+    if (file.size > MAX_AUDIO_BYTES) {
+      setAudioError(`${file.name}: larger than 10 MB (${formatSize(file.size)}).`)
+      return
+    }
+    clearAudio({ id: newId(), blob: file, name: file.name, url: URL.createObjectURL(file), source: 'upload' })
+  }
+
+  async function startRecording() {
+    setAudioError('')
+    if (!recordingSupported) {
+      setAudioError('This browser cannot record from the microphone. Upload an audio file instead.')
+      return
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+      streamRef.current = stream
+      const mime = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : ''
+      const rec = mime ? new MediaRecorder(stream, { mimeType: mime }) : new MediaRecorder(stream)
+      chunksRef.current = []
+      rec.ondataavailable = (ev) => {
+        if (ev.data.size) chunksRef.current.push(ev.data)
+      }
+      rec.onerror = () => {
+        stopMicTracks()
+        if (!pageLiveRef.current) return
+        setAudioError('Recording failed. Try again or upload an audio file.')
+        setRecording(false)
+      }
+      rec.onstop = () => {
+        const type = rec.mimeType || 'audio/webm'
+        const blob = new Blob(chunksRef.current, { type })
+        stopMicTracks()
+        recorderRef.current = null
+        if (!pageLiveRef.current) return
+        setRecording(false)
+        if (blob.size === 0) {
+          setAudioError('No audio was captured. Try recording again or upload a file.')
+          return
+        }
+        if (blob.size > MAX_AUDIO_BYTES) {
+          setAudioError(`Recording is larger than 10 MB (${formatSize(blob.size)}).`)
+          return
+        }
+        const ext = type.includes('ogg') ? 'ogg' : type.includes('mp4') ? 'm4a' : 'webm'
+        clearAudio({
+          id: newId(),
+          blob,
+          name: `complaint-recording.${ext}`,
+          url: URL.createObjectURL(blob),
+          source: 'record',
+        })
+      }
+      recorderRef.current = rec
+      rec.start()
+      setRecording(true)
+    } catch (err) {
+      stopMicTracks()
+      if (!pageLiveRef.current) return
+      setRecording(false)
+      const name = err instanceof DOMException ? err.name : ''
+      if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+        setAudioError('Microphone permission was denied. You can still upload an audio file.')
+        return
+      }
+      if (name === 'NotFoundError') {
+        setAudioError('No microphone was found. Upload an audio file instead.')
+        return
+      }
+      setAudioError('Could not start the microphone. Upload an audio file instead.')
+    }
+  }
+
+  function stopRecording() {
+    const rec = recorderRef.current
+    if (rec && rec.state !== 'inactive') rec.stop()
+    else {
+      setRecording(false)
+      stopMicTracks()
+    }
+  }
+
+  function goToStep(next: number) {
+    if (recording) stopRecording()
+    setStep(next)
+  }
 
   function submit() {
-    const n = 50 + Math.floor(Math.random() * 40)
-    const id = `RNE-PUN-2026-00${n}`
-    addComplaint({
-      id,
-      hazard: (draft.hazard || 'open-drain') as Hazard,
-      locality: region?.name || 'Hadapsar',
-      pin: draft.pin || region?.pin || null,
-      reportedOn: '09 Oct 2026',
-      reportedAt: '10:30 AM IST',
-      status: 'submitted',
-      satisfaction: 'not-yet-resolved',
-      attention: draft.attention,
-      description:
-        draft.description ||
-        'Audio description provided for this sample complaint. Location remains compulsory for both written and audio paths.',
-      photoName: draft.photoName || 'hadapsar-drain-photo.jpg',
-      photoKind: draft.photoKind,
-      photoSize: '2.4 MB',
-      site: site.site,
-      coords: site.coords,
-      drainId: draft.hazard === 'pothole' ? undefined : site.drainId,
-      coverId: draft.hazard === 'pothole' ? undefined : site.coverId,
-      potholeId: draft.hazard === 'pothole' ? 'ILL-PH-VNZ-0004' : undefined,
-    })
-    nav(`/complaints/submitted?id=${id}`)
+    if (submitting) return
+    setSubmitError('')
+    if (recording) {
+      setSubmitError('Stop the recording before submitting.')
+      return
+    }
+    if (!photos.length) {
+      setSubmitError('Add at least one photo before submitting.')
+      return
+    }
+    if (!draft.description.trim() && !audio) {
+      setSubmitError('Add a written description or an audio description.')
+      return
+    }
+    setSubmitting(true)
+    try {
+      const n = 50 + Math.floor(Math.random() * 40)
+      const id = `RNE-PUN-2026-00${n}`
+      const photoAttachments = photos.map((p) => toSessionAttachment(p.file.name, p.file, p.url))
+      const audioAttachment = audio ? toSessionAttachment(audio.name, audio.blob, audio.url) : undefined
+      keepUrlsRef.current = [...photoAttachments.map((p) => p.objectUrl), audioAttachment?.objectUrl].filter(
+        (u): u is string => Boolean(u),
+      )
+      addComplaint({
+        id,
+        hazard: (draft.hazard || 'open-drain') as Hazard,
+        locality: region?.name || 'Hadapsar',
+        pin: draft.pin || region?.pin || null,
+        reportedOn: '09 Oct 2026',
+        reportedAt: '10:30 AM IST',
+        status: 'submitted',
+        satisfaction: 'not-yet-resolved',
+        attention: draft.attention,
+        description:
+          draft.description.trim() ||
+          'Audio description provided. Location remains compulsory for both written and audio paths.',
+        photoName: photos.map((p) => p.file.name).join(', '),
+        photoKind: draft.photoKind,
+        photoSize: formatSize(photos.reduce((sum, p) => sum + p.file.size, 0)),
+        site: site.site,
+        coords: site.coords,
+        drainId: draft.hazard === 'pothole' ? undefined : site.drainId,
+        coverId: draft.hazard === 'pothole' ? undefined : site.coverId,
+        potholeId: draft.hazard === 'pothole' ? 'ILL-PH-VNZ-0004' : undefined,
+        audioName: audio?.name,
+        photos: photoAttachments,
+        audio: audioAttachment,
+      })
+      nav(`/complaints/submitted?id=${id}`)
+    } catch {
+      setSubmitting(false)
+      keepUrlsRef.current = []
+      setSubmitError('Could not prepare this complaint. Try again.')
+    }
   }
 
   return (
@@ -241,7 +520,7 @@ export function FileComplaintPage() {
               <span className="tiny muted">{draft.locationOn ? 'Required state · Location enabled (sample)' : 'Required state · Location not yet enabled'}</span>
             </div>
             <div style={{ textAlign: 'right', marginTop: 16 }}>
-              <button className="ghost" type="button" disabled={!canStep2} onClick={() => setStep(2)}>
+              <button className="ghost" type="button" disabled={!canStep2} onClick={() => goToStep(2)}>
                 Next: description {canStep2 ? '' : '· Unavailable'}
               </button>
             </div>
@@ -286,23 +565,72 @@ export function FileComplaintPage() {
             </label>
             <p className="hint">Provide a written description OR an audio description. Location remains compulsory for both.</p>
             <div className="callout">
-              <strong>Prefer to speak? Upload an audio description</strong>
-              <div className="tiny muted">For citizens who cannot write. Describe the same site in your own words; written text is not required when audio is provided.</div>
-              <button
-                className="ghost"
-                type="button"
-                style={{ marginTop: 8 }}
-                onClick={() => setDraft({ ...draft, audioName: 'complaint-audio-sample.mp3' })}
-              >
-                Choose audio file
-              </button>
-              <div className="tiny muted">{draft.audioName || 'No audio attached · Upload control is illustrative'}</div>
+              <strong>Prefer to speak? Record or upload audio</strong>
+              <div className="tiny muted">
+                For citizens who cannot write. Audio stays in this browser session only until a later stage saves it. MP3, WAV,
+                OGG, WebM, or M4A · up to 10 MB.
+              </div>
+              <input
+                ref={audioInputRef}
+                type="file"
+                accept="audio/*,.mp3,.wav,.ogg,.webm,.m4a,.aac"
+                hidden
+                onChange={onAudioSelected}
+              />
+              <div className="row" style={{ marginTop: 8, flexWrap: 'wrap' }}>
+                {recording ? (
+                  <button className="btn" type="button" onClick={stopRecording}>
+                    Stop recording
+                  </button>
+                ) : (
+                  <button className="btn" type="button" onClick={() => void startRecording()} disabled={!recordingSupported}>
+                    Record with microphone
+                  </button>
+                )}
+                <button className="ghost" type="button" onClick={() => audioInputRef.current?.click()} disabled={recording}>
+                  Choose audio file
+                </button>
+              </div>
+              {recording && (
+                <p className="hint" style={{ color: 'var(--danger)' }}>
+                  Recording… speak clearly, then press Stop recording. Next step is disabled until you stop.
+                </p>
+              )}
+              {!recordingSupported && (
+                <p className="hint">Microphone recording is not available here. Use Choose audio file instead.</p>
+              )}
+              {audio && (
+                <div style={{ marginTop: 12 }}>
+                  <audio controls src={audio.url} style={{ width: '100%', maxWidth: 420 }}>
+                    Your browser cannot play this audio clip.
+                  </audio>
+                  <div className="tiny muted">
+                    {audio.name} · {formatSize(audio.blob.size)} · {audio.source === 'record' ? 'Recorded' : 'Uploaded'} · this
+                    session only
+                  </div>
+                  <button
+                    className="ghost"
+                    type="button"
+                    style={{ marginTop: 8 }}
+                    onClick={() => clearAudio(null)}
+                    disabled={recording}
+                  >
+                    Remove audio
+                  </button>
+                </div>
+              )}
+              {!audio && !recording && <div className="tiny muted">No audio attached</div>}
+              {audioError && (
+                <p className="hint" style={{ color: 'var(--danger)' }}>
+                  {audioError}
+                </p>
+              )}
             </div>
             <div className="space" style={{ marginTop: 16 }}>
-              <button className="ghost" type="button" onClick={() => setStep(1)}>
+              <button className="ghost" type="button" onClick={() => goToStep(1)}>
                 Back: locality & location
               </button>
-              <button className="btn" type="button" disabled={!canStep3} onClick={() => setStep(3)}>
+              <button className="btn" type="button" disabled={!canStep3 || recording} onClick={() => goToStep(3)}>
                 Next: photo & attention
               </button>
             </div>
@@ -346,14 +674,55 @@ export function FileComplaintPage() {
               <div className="tiny muted">Normal photos and geotagged photos both use the location captured in step 1. Photo metadata does not replace required citizen location.</div>
             </div>
             <div className="callout" style={{ marginTop: 12 }}>
-              {draft.photoName || 'hadapsar-drain-photo.jpg'}
+              <strong>Add photo proof *</strong>
               <div className="tiny muted">
-                {draft.photoKind === 'normal' ? 'Normal photo' : 'Geotagged photo'} · 2.4 MB · Illustrative attachment, no file uploaded
+                JPEG, PNG, or WebP · up to 5 MB each · up to {MAX_PHOTOS} photos. Previews stay in this browser session; files are
+                not sent to a server yet.
               </div>
-              <button className="ghost" type="button" style={{ marginTop: 8 }} onClick={() => setDraft({ ...draft, photoName: 'hadapsar-drain-photo.jpg' })}>
-                Choose / replace photo
+              <input
+                ref={photoInputRef}
+                type="file"
+                accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
+                multiple
+                hidden
+                onChange={onPhotosSelected}
+              />
+              <button className="ghost" type="button" style={{ marginTop: 8 }} onClick={() => photoInputRef.current?.click()}>
+                {photos.length ? 'Add more photos' : 'Choose photos'}
               </button>
             </div>
+            {photos.length > 0 && (
+              <div
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))',
+                  gap: 12,
+                  marginTop: 12,
+                }}
+              >
+                {photos.map((p) => (
+                  <div key={p.id} className="card pad" style={{ padding: 8 }}>
+                    <img
+                      src={p.url}
+                      alt={p.file.name}
+                      style={{ width: '100%', height: 110, objectFit: 'cover', borderRadius: 8, display: 'block' }}
+                    />
+                    <div className="tiny" style={{ marginTop: 6, wordBreak: 'break-all' }}>
+                      {p.file.name}
+                    </div>
+                    <div className="tiny muted">{formatSize(p.file.size)}</div>
+                    <button className="ghost" type="button" style={{ marginTop: 6, width: '100%' }} onClick={() => removePhoto(p.id)}>
+                      Remove
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {photoError && (
+              <p className="hint" style={{ color: 'var(--danger)' }}>
+                {photoError}
+              </p>
+            )}
             <h2>Attention level *</h2>
             <div className="grid-3">
               {(['high', 'moderate', 'low'] as Attention[]).map((a) => (
@@ -363,12 +732,18 @@ export function FileComplaintPage() {
               ))}
             </div>
             <p className="hint">Citizen-selected attention level. This does not imply a response-time commitment.</p>
+            {submitError && (
+              <p className="hint" style={{ color: 'var(--danger)' }}>
+                {submitError}
+              </p>
+            )}
+            {submitting && <p className="callout">Preparing your complaint in this browser session…</p>}
             <div className="space" style={{ marginTop: 16 }}>
-              <button className="ghost" type="button" onClick={() => setStep(2)}>
+              <button className="ghost" type="button" onClick={() => goToStep(2)} disabled={submitting}>
                 Back: description
               </button>
-              <button className="btn" type="button" onClick={submit}>
-                Submit complaint
+              <button className="btn" type="button" onClick={submit} disabled={submitting || recording || photos.length === 0}>
+                {submitting ? 'Submitting…' : 'Submit complaint'}
               </button>
             </div>
           </section>
@@ -397,9 +772,20 @@ export function FileComplaintPage() {
               </>
             )}
             <div className="tiny muted">Description</div>
-            <p>{draft.description ? 'Written description provided' : draft.audioName ? 'Audio description provided' : 'Pending'}</p>
+            <p>
+              {draft.description.trim()
+                ? 'Written description provided'
+                : audio
+                  ? 'Audio description provided'
+                  : 'Pending'}
+            </p>
             <div className="tiny muted">Photo</div>
-            <p>{draft.photoKind === 'normal' ? 'Normal photo provided' : 'Geotagged photo provided'}</p>
+            <p>
+              {photos.length
+                ? `${photos.length} photo${photos.length === 1 ? '' : 's'} selected · ${draft.photoKind === 'normal' ? 'Normal' : 'Geotagged'}`
+                : 'No photo yet'}
+            </p>
+            {audio && <p className="tiny muted">Audio: {audio.name}</p>}
           </aside>
         </div>
       )}
@@ -433,13 +819,47 @@ export function SubmittedPage() {
           {c.reportedAt ? `, ${c.reportedAt}` : ''} · {attentionLabel[c.attention]}
         </p>
         <div className="callout">
-          <strong>Site and evidence recorded in the sample</strong>
+          <strong>Site and evidence recorded in this session</strong>
           <div className="tiny muted">
             {c.site}
             {c.drainId ? ` · ${c.drainId}` : ''}
-            {c.coverId ? ` / ${c.coverId}` : ''} (illustrative). Written description and {c.photoKind}-photo proof provided; required location enabled.
+            {c.coverId ? ` / ${c.coverId}` : ''} (illustrative). Files below are held in this browser tab only — they are not
+            uploaded to a server yet. Refreshing the page will clear a newly filed complaint.
           </div>
         </div>
+        {c.photos && c.photos.length > 0 && (
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))',
+              gap: 12,
+              margin: '12px 0',
+            }}
+          >
+            {c.photos.map((p) => (
+              <div key={p.objectUrl}>
+                <img
+                  src={p.objectUrl}
+                  alt={p.name}
+                  style={{ width: '100%', height: 110, objectFit: 'cover', borderRadius: 8, display: 'block' }}
+                />
+                <div className="tiny muted" style={{ wordBreak: 'break-all' }}>
+                  {p.name} · {p.sizeLabel}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        {c.audio && (
+          <div style={{ marginBottom: 12 }}>
+            <audio controls src={c.audio.objectUrl} style={{ width: '100%' }}>
+              Your browser cannot play this audio clip.
+            </audio>
+            <div className="tiny muted">
+              {c.audio.name} · {c.audio.sizeLabel}
+            </div>
+          </div>
+        )}
         <p>Keep this ID to view the case status or reference it in feedback and escalation.</p>
         <div className="row">
           <Link className="btn" to="/status">

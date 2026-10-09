@@ -5,6 +5,14 @@ export type Satisfaction = 'not-yet-resolved' | 'awaiting-confirmation' | 'satis
 export type Attention = 'high' | 'moderate' | 'low'
 export type PhotoKind = 'geotagged' | 'normal'
 
+/** Browser-session preview only. Object URLs are not stored on a server. */
+export type SessionAttachment = {
+  name: string
+  sizeLabel: string
+  mime: string
+  objectUrl: string
+}
+
 export type Session = {
   role: Role
   name: string
@@ -39,6 +47,8 @@ export type Complaint = {
   workerAssigned?: string
   rejectionReason?: string
   audioName?: string
+  photos?: SessionAttachment[]
+  audio?: SessionAttachment
 }
 
 export type Assignment = {
