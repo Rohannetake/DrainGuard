@@ -127,7 +127,7 @@ Open `.env` and fill in your Supabase project credentials:
 
 ```env
 VITE_SUPABASE_URL=https://YOUR_PROJECT_REF.supabase.co
-VITE_SUPABASE_ANON_KEY=YOUR_ANON_PUBLIC_KEY
+VITE_SUPABASE_PUBLISHABLE_KEY=YOUR_ANON_PUBLIC_KEY
 ```
 
 > 💡 *Note: If `.env` contains placeholder keys, DrainGuard will seamlessly run in **Demo Fallback Mode** with sample Pune datasets.*
